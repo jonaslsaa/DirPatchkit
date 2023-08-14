@@ -26,9 +26,16 @@ def validate_patch(patch_path, target_dir):
                     return False
     return True
 
-def apply_patch(patch_path, target_dir):
-    """Apply the binary patch to the target directory."""
+def create_reverse_patch(original_data, new_data, reverse_patches, original_file_path):
+    """Create a reverse binary patch."""
+    reverse_patch_data = bsdiff4.diff(new_data, original_data)
+    patch_name = os.path.relpath(original_file_path) + ".patch"
+    reverse_patches[patch_name] = reverse_patch_data
+
+def apply_patch_with_backup(patch_path, target_dir, create_backup):
+    """Apply the binary patch and optionally create a reverse patch."""
     patch_size = 0
+    reverse_patches = {}
     with zipfile.ZipFile(patch_path, 'r') as zipf:
         patch_files = zipf.namelist()
         for patch_file in patch_files:
@@ -45,6 +52,10 @@ def apply_patch(patch_path, target_dir):
                 new_data = bsdiff4.patch(original_data, patch_data)
                 click.echo(f"Patched: {patch_file}")
                 
+                if create_backup:
+                    create_reverse_patch(original_data, new_data, reverse_patches, original_file_path)
+                    click.echo(f"Created reverse patch: {patch_file}")
+                
                 # Write the patched data back to the original file
                 with open(original_file_path, 'wb') as orig_file:
                     orig_file.write(new_data)
@@ -54,6 +65,13 @@ def apply_patch(patch_path, target_dir):
                 os.makedirs(os.path.dirname(destination_path), exist_ok=True)
                 with open(destination_path, 'wb') as dest_file:
                     dest_file.write(zipf.read(patch_file))
+
+    if create_backup:
+        reverse_patch_file = patch_path.replace(".zip", "_revertpatch.zip")
+        with zipfile.ZipFile(reverse_patch_file, 'w') as zipf:
+            for patch_name, patch_data in reverse_patches.items():
+                zipf.writestr(patch_name, patch_data)
+
     click.echo(f"Patch size: {bytes_to_human_readable(patch_size)}")
     return patch_size
 
@@ -71,6 +89,7 @@ def main_gui():
     target_folder_path = tk.StringVar()
     patches = find_patches()
     patch_file_path.set(patches[0] if patches else "")
+    backup_var = tk.BooleanVar()
     
     script_directory = os.path.dirname(os.path.abspath(__file__))
     
@@ -100,8 +119,10 @@ def main_gui():
 
         for patch in patches:
             log_text.insert(tk.END, f"Applying patch: {patch} to {target}...\n")
-            total_patch_size = apply_patch(patch, target)
+            total_patch_size = apply_patch_with_backup(patch, target, backup_var.get())
             log_text.insert(tk.END, f"Applied patch: {patch} ({bytes_to_human_readable(total_patch_size)})\n")
+            if backup_var.get():
+                log_text.insert(tk.END, f"Backup patch created for: {patch}\n")
             progress_bar['value'] += 1
         
         log_text.insert(tk.END, "Done.\n")
@@ -119,6 +140,9 @@ def main_gui():
     ttk.Label(frame, text="Target Folder:").grid(row=1, column=0, sticky=tk.W, pady=5)
     ttk.Entry(frame, textvariable=target_folder_path, width=40).grid(row=1, column=1, pady=5, padx=5)
     ttk.Button(frame, text="Browse", command=select_target_folder).grid(row=1, column=2, pady=5)
+    
+    # Backup checkbox
+    ttk.Checkbutton(frame, text="Create backup patch", variable=backup_var).grid(row=5, column=0, columnspan=3, pady=5)
 
     # Start button
     ttk.Button(frame, text="Start Patching", command=apply_patches_gui).grid(row=2, column=0, columnspan=3, pady=10)
@@ -135,8 +159,9 @@ def main_gui():
 
 @click.command()
 @click.option('--gui', is_flag=True, help="Use the GUI instead of the CLI.")
+@click.option('--backup', is_flag=True, help="Create a backup patch to reverse changes.")
 @click.argument('target', type=click.Path(exists=True), required=False)
-def main(gui, target):
+def main(gui, backup, target):
     """Apply binary patches located in the directory of the TARGET folder."""
     patches = find_patches()
     
@@ -158,7 +183,7 @@ def main(gui, target):
             return
     
     for patch in patches:
-        apply_patch(patch, target)
+        apply_patch_with_backup(patch, target, backup)
         click.echo(f"Applied patch: {patch}")
 
 if __name__ == "__main__":
