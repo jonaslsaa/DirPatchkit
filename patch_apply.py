@@ -3,6 +3,13 @@ import click
 import zipfile
 import bsdiff4
 
+def bytes_to_human_readable(num: int) -> str:
+    """Convert a number of bytes to a human-readable string."""
+    for unit in ['bytes', 'KB', 'MB', 'GB', 'TB']:
+        if num < 1024.0:
+            return f"{num:.2f} {unit}"
+        num /= 1024.0
+
 def find_patches():
     """Find all _patch.zip files in this directory."""
     return [f for f in os.listdir() if f.endswith("_patch.zip")]
@@ -21,6 +28,7 @@ def validate_patch(patch_path, target_dir):
 
 def apply_patch(patch_path, target_dir):
     """Apply the binary patch to the target directory."""
+    patch_size = 0
     with zipfile.ZipFile(patch_path, 'r') as zipf:
         patch_files = zipf.namelist()
         for patch_file in patch_files:
@@ -31,9 +39,11 @@ def apply_patch(patch_path, target_dir):
                 with open(original_file_path, 'rb') as orig_file:
                     original_data = orig_file.read()
                 patch_data = zipf.read(patch_file)
+                patch_size += len(patch_data)
                 
                 # Apply the patch
                 new_data = bsdiff4.patch(original_data, patch_data)
+                click.echo(f"Patched: {patch_file}")
                 
                 # Write the patched data back to the original file
                 with open(original_file_path, 'wb') as orig_file:
@@ -44,6 +54,8 @@ def apply_patch(patch_path, target_dir):
                 os.makedirs(os.path.dirname(destination_path), exist_ok=True)
                 with open(destination_path, 'wb') as dest_file:
                     dest_file.write(zipf.read(patch_file))
+    click.echo(f"Patch size: {bytes_to_human_readable(patch_size)}")
+    return patch_size
 
 
 import tkinter as tk
@@ -52,7 +64,7 @@ from tkinter import filedialog, ttk, scrolledtext
 def main_gui():
     # Create the main GUI window
     root = tk.Tk()
-    root.title("Patch Applier GUI")
+    root.title("Vox's Folder Patching Tool")
 
     # Variables to hold file paths
     patch_file_path = tk.StringVar()
@@ -88,8 +100,8 @@ def main_gui():
 
         for patch in patches:
             log_text.insert(tk.END, f"Applying patch: {patch} to {target}...\n")
-            apply_patch(patch, target)
-            log_text.insert(tk.END, f"Applied patch: {patch}\n")
+            total_patch_size = apply_patch(patch, target)
+            log_text.insert(tk.END, f"Applied patch: {patch} ({bytes_to_human_readable(total_patch_size)})\n")
             progress_bar['value'] += 1
         
         log_text.insert(tk.END, "Done.\n")
