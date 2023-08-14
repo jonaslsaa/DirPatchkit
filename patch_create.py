@@ -80,7 +80,10 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
             rel_path = os.path.relpath(diff_file, base)
             target_file_path = os.path.join(target, rel_path)
             
-            if os.path.getsize(diff_file) > (128 * 1024 * 1024):
+            if os.path.getsize(diff_file) > (64 * 1024 * 1024):
+                if flag_verbose:
+                    num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
+                    click.echo(f"File is larger than 128 MB, splitting into {num_chunks} chunks: {rel_path}")
                 # Split the large file into chunks and create a patch for each chunk
                 base_chunks = list(split_file_into_chunks(diff_file))
                 target_chunks = list(split_file_into_chunks(target_file_path))
