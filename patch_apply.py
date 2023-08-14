@@ -158,14 +158,14 @@ def main_gui():
     root.mainloop()
 
 @click.command()
-@click.option('--gui', is_flag=True, help="Use the GUI instead of the CLI.")
+@click.option('--nogui', is_flag=True, help="Use the GUI instead of the CLI.")
 @click.option('--backup', is_flag=True, help="Create a backup patch to reverse changes.")
 @click.argument('target', type=click.Path(exists=True), required=False)
-def main(gui, backup, target):
+def main(nogui, backup, target):
     """Apply binary patches located in the directory of the TARGET folder."""
     patches = find_patches()
     
-    if gui:
+    if not nogui:
         main_gui()
         return
     if not target:
