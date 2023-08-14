@@ -69,32 +69,37 @@ def create_file_patch(base: str, target: str, patch_dir: str) -> None:
     differences = find_differences(base, target)
 
     with zipfile.ZipFile(f"{patch_dir}.zip", 'w') as zipf:
-        for diff_file in differences['changed']:
+        for i, diff_file in enumerate(differences['changed']):
             rel_path = os.path.relpath(diff_file, base)
             zipf.write(diff_file, rel_path)
             
             if flag_verbose:
-                click.echo(f"Added file to ZIP: {rel_path}")
+                click.echo(f"Added file to ZIP: {rel_path} - {i+1}/{len(differences['changed'])}")
 
-        for new_file in differences['new']:
+        for i, new_file in enumerate(differences['new']):
             rel_path = os.path.relpath(new_file, target)
             zipf.write(new_file, rel_path)
             
             if flag_verbose:
-                click.echo(f"Added new file to ZIP: {rel_path}")
+                click.echo(f"Added new file to ZIP: {rel_path} - {i+1}/{len(differences['new'])}")
 
 @click.command()
 @click.argument('base', type=click.Path(exists=True))
 @click.argument('target', type=click.Path(exists=True))
 @click.option('--patch_dir', type=click.Path(), default=None, help="Directory or file where the patch will be created.")
 @click.option('--mode', type=click.Choice(['file', 'binary'], case_sensitive=False), default='file', help="Mode of operation: 'file' or 'binary'.")
-@click.option('--verbose', '-v', is_flag=True, default=True, help="Enable verbose output.")
+@click.option('--verbose', '-v', is_flag=True, default=False, help="Enable verbose output.")
 def main(base, target, patch_dir, mode, verbose):
     global flag_verbose
     flag_verbose = verbose
+    if verbose:
+        click.echo("Verbose output enabled.")
     
     if patch_dir is None:
-        default_name = f"{os.path.normpath(target)}_patch"
+        script_dir_path = os.path.dirname(os.path.realpath(__file__))
+        default_name = f"{os.path.basename(base)}_{os.path.basename(target)}_patch".replace(' ', '_')
+        default_path = os.path.join(script_dir_path, default_name)
+        click.echo(f"Patch directory not specified, using default: {default_path}")
         patch_dir = f"{default_name}.zip" if mode == 'binary' else default_name
     
     click.echo(f"Comparing {base} and {target} in {mode} mode...")
