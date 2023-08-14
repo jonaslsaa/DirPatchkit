@@ -45,11 +45,95 @@ def apply_patch(patch_path, target_dir):
                 with open(destination_path, 'wb') as dest_file:
                     dest_file.write(zipf.read(patch_file))
 
+
+import tkinter as tk
+from tkinter import filedialog, ttk, scrolledtext
+
+def main_gui():
+    # Create the main GUI window
+    root = tk.Tk()
+    root.title("Patch Applier GUI")
+
+    # Variables to hold file paths
+    patch_file_path = tk.StringVar()
+    target_folder_path = tk.StringVar()
+    patches = find_patches()
+    patch_file_path.set(patches[0] if patches else "")
+    
+    script_directory = os.path.dirname(os.path.abspath(__file__))
+    
+    # Define the GUI functions
+    def select_patch_file():
+        patch_file_path.set(filedialog.askopenfilename(title="Select the Patch File", filetypes=[("ZIP files", "*.zip")], initialdir=script_directory))
+        
+    def select_target_folder():
+        target_folder_path.set(filedialog.askdirectory(title="Select the Target Folder", initialdir=script_directory))
+
+    def apply_patches_gui():
+        patches = [patch_file_path.get()]
+        target = target_folder_path.get()
+        
+        if not patches or not target:
+            log_text.insert(tk.END, "Patch file or target folder not selected.\n")
+            return
+        
+        log_text.insert(tk.END, f"Found 1 patch. Validating...\n")
+        
+        if not validate_patch(patches[0], target):
+            log_text.insert(tk.END, f"Patch {patches[0]} is not applicable to {target}.\n")
+            return
+        
+        progress_bar['maximum'] = len(patches)
+        progress_bar['value'] = 0
+
+        for patch in patches:
+            log_text.insert(tk.END, f"Applying patch: {patch} to {target}...\n")
+            apply_patch(patch, target)
+            log_text.insert(tk.END, f"Applied patch: {patch}\n")
+            progress_bar['value'] += 1
+        
+        log_text.insert(tk.END, "Done.\n")
+
+    # Layout
+    frame = ttk.Frame(root, padding="10")
+    frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+    # Patch file selection
+    ttk.Label(frame, text="Patch File:").grid(row=0, column=0, sticky=tk.W, pady=5)
+    ttk.Entry(frame, textvariable=patch_file_path, width=40).grid(row=0, column=1, pady=5, padx=5)
+    ttk.Button(frame, text="Browse", command=select_patch_file).grid(row=0, column=2, pady=5)
+
+    # Target folder selection
+    ttk.Label(frame, text="Target Folder:").grid(row=1, column=0, sticky=tk.W, pady=5)
+    ttk.Entry(frame, textvariable=target_folder_path, width=40).grid(row=1, column=1, pady=5, padx=5)
+    ttk.Button(frame, text="Browse", command=select_target_folder).grid(row=1, column=2, pady=5)
+
+    # Start button
+    ttk.Button(frame, text="Start Patching", command=apply_patches_gui).grid(row=2, column=0, columnspan=3, pady=10)
+
+    # Progress bar
+    progress_bar = ttk.Progressbar(frame, orient="horizontal", length=200, mode="determinate")
+    progress_bar.grid(row=3, column=0, columnspan=3, pady=5)
+
+    # Log text area
+    log_text = scrolledtext.ScrolledText(frame, width=50, height=10)
+    log_text.grid(row=4, column=0, columnspan=3, pady=10)
+
+    root.mainloop()
+
 @click.command()
-@click.argument('target', type=click.Path(exists=True))
-def main(target):
+@click.option('--gui', is_flag=True, help="Use the GUI instead of the CLI.")
+@click.argument('target', type=click.Path(exists=True), required=False)
+def main(gui, target):
     """Apply binary patches located in the directory of the TARGET folder."""
     patches = find_patches()
+    
+    if gui:
+        main_gui()
+        return
+    if not target:
+        click.echo("Target folder not specified.")
+        return
     
     if not patches:
         click.echo(f"No patches found in this directory.")
