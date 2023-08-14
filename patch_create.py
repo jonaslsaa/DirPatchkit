@@ -1,5 +1,4 @@
 import os
-import shutil
 import filecmp
 import click
 import zipfile
