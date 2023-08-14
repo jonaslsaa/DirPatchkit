@@ -42,6 +42,12 @@ def apply_patch_with_backup(patch_path, target_dir, create_backup):
             if patch_file.endswith('.patch'):
                 original_file_path = os.path.join(target_dir, patch_file.replace('.patch', ''))
                 
+                # Check the size of the original file before patching
+                if os.path.getsize(original_file_path) > (128 * 1024 * 1024):
+                    # If the file is larger than 128 MB, copy it directly to the patch without patching
+                    zipf.write(original_file_path, patch_file)
+                    continue
+                
                 # Read the original file and the patch data
                 with open(original_file_path, 'rb') as orig_file:
                     original_data = orig_file.read()

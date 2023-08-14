@@ -58,8 +58,20 @@ def find_differences(base: str, target: str) -> dict:
 
     return differences
 
+CHUNK_SIZE = 32 * 1024 * 1024  # 32 MB
+
+def split_file_into_chunks(file_path):
+    """Split a file into chunks and return the chunks as bytes."""
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+
 def create_binary_patch(base: str, target: str, patch_file: str) -> None:
     differences = find_differences(base, target)
+    
     if flag_verbose:
         click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
     
@@ -68,16 +80,25 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
             rel_path = os.path.relpath(diff_file, base)
             target_file_path = os.path.join(target, rel_path)
             
-            if flag_verbose:
-                click.echo(f"Creating binary patch for: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
-            
-            patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
-            patch_name = f"{rel_path}.patch"
-            zipf.writestr(patch_name, patch_data)
-            
-            if flag_verbose:
-                patch_data_size = bytes_to_human_readable(len(patch_data))
-                click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
+            if os.path.getsize(diff_file) > (128 * 1024 * 1024):
+                # Split the large file into chunks and create a patch for each chunk
+                base_chunks = list(split_file_into_chunks(diff_file))
+                target_chunks = list(split_file_into_chunks(target_file_path))
+                for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
+                    patch_data = bsdiff4.diff(base_chunk, target_chunk)
+                    patch_name = f"{rel_path}.part_{idx}.patch"
+                    zipf.writestr(patch_name, patch_data)
+                    
+                    if flag_verbose:
+                        click.echo(f"Created binary patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
+            else:
+                patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
+                patch_name = f"{rel_path}.patch"
+                zipf.writestr(patch_name, patch_data)
+
+                if flag_verbose:
+                    patch_data_size = bytes_to_human_readable(len(patch_data))
+                    click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
         
         for new_file in differences['new']:
             rel_path = os.path.relpath(new_file, target)
@@ -85,6 +106,8 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
             
             if flag_verbose:
                 click.echo(f"Added new file to ZIP: {rel_path}")
+
+
 
 def create_file_patch(base: str, target: str, patch_dir: str) -> None:
     differences = find_differences(base, target)
