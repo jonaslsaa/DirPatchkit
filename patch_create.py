@@ -13,42 +13,63 @@ def bytes_to_human_readable(num: int) -> str:
             return f"{num:.2f} {unit}"
         num /= 1024.0
 
+import concurrent.futures
+
+def is_file_different(file1, file2):
+    """Compare two files, first shallowly, then deeply if necessary."""
+    if filecmp.cmp(file1, file2, shallow=True):
+        return False
+    return not filecmp.cmp(file1, file2, shallow=False)
+
 def find_differences(base: str, target: str) -> dict:
     differences = {
         'changed': [],
         'new': []
     }
-    
-    base_files = set(os.listdir(base))
-    target_files = set(os.listdir(target))
-    
+    if flag_verbose:
+        click.echo(f"Diff: {base} <> {target}")
+
+    base_entries = {entry.name: entry for entry in os.scandir(base)}
+    target_entries = {entry.name: entry for entry in os.scandir(target)}
+
     # Identify files that are only in the target (new files)
-    only_in_target = target_files - base_files
+    only_in_target = target_entries.keys() - base_entries.keys()
     differences['new'].extend([os.path.join(target, f) for f in only_in_target])
-    
+
     # Check files that are in both directories
-    for common_file in base_files.intersection(target_files):
-        base_file_path = os.path.join(base, common_file)
-        target_file_path = os.path.join(target, common_file)
-        
-        if os.path.isdir(base_file_path) and os.path.isdir(target_file_path):
-            # Recurse into directories
+    common_files = base_entries.keys() & target_entries.keys()
+    
+    # Use threading for file comparisons
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_file = {executor.submit(is_file_different, base_entries[file].path, target_entries[file].path): file for file in common_files if base_entries[file].is_file() and target_entries[file].is_file()}
+        for future in concurrent.futures.as_completed(future_to_file):
+            file = future_to_file[future]
+            if future.result():
+                differences['changed'].append(base_entries[file].path)
+
+    for common_file in common_files:
+        base_file_path = base_entries[common_file].path
+        target_file_path = target_entries[common_file].path
+
+        if base_entries[common_file].is_dir() and target_entries[common_file].is_dir():
             sub_diff = find_differences(base_file_path, target_file_path)
             differences['changed'].extend(sub_diff['changed'])
             differences['new'].extend(sub_diff['new'])
-        elif os.path.isfile(base_file_path) and os.path.isfile(target_file_path):
-            if not filecmp.cmp(base_file_path, target_file_path, shallow=False):
-                differences['changed'].append(base_file_path)
-    
+
     return differences
 
 def create_binary_patch(base: str, target: str, patch_file: str) -> None:
     differences = find_differences(base, target)
+    if flag_verbose:
+        click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
     
     with zipfile.ZipFile(patch_file, 'w') as zipf:
         for diff_file in differences['changed']:
             rel_path = os.path.relpath(diff_file, base)
             target_file_path = os.path.join(target, rel_path)
+            
+            if flag_verbose:
+                click.echo(f"Creating binary patch for: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
             
             patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
             patch_name = f"{rel_path}.patch"
@@ -67,6 +88,8 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
 
 def create_file_patch(base: str, target: str, patch_dir: str) -> None:
     differences = find_differences(base, target)
+    if flag_verbose:
+        click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
 
     with zipfile.ZipFile(f"{patch_dir}.zip", 'w') as zipf:
         for i, diff_file in enumerate(differences['changed']):
