@@ -114,7 +114,7 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
                         click.echo(f"File is larger than {flag_large_file_size} MB, using xdelta: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
                     
                     patch_data = xdeltawrapper.create_patch(diff_file, target_file_path)
-                    patch_name = f"{rel_path}.patch"
+                    patch_name = f"{rel_path}.vcdiff"
                     zipf.writestr(patch_name, patch_data)
                     
                     if flag_verbose:
