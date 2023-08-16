@@ -81,7 +81,7 @@ def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, 
 
         if flag_verbose:
             patch_data_size = bytes_to_human_readable(len(patch_data))
-            click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
+            click.echo(f"Created patch: {patch_name} ({patch_data_size})")
 
 
 def split_file_into_chunks(file_path):
