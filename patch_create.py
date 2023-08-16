@@ -3,8 +3,12 @@ import filecmp
 import click
 import zipfile
 import bsdiff4
+import xdeltawrapper
 
 flag_verbose = False
+flag_large_file_strategy = 'xdelta'
+flag_split_size = 16
+flag_large_file_size = 32
 
 def bytes_to_human_readable(num: int) -> str:
     """Convert a number of bytes to a human-readable string."""
@@ -27,7 +31,8 @@ def find_differences(base: str, target: str) -> dict:
         'new': []
     }
     if flag_verbose:
-        click.echo(f"Diff: {base} <> {target}")
+        click.echo(f"Diff: {base}")
+        click.echo(f"   <> {target}")
 
     base_entries = {entry.name: entry for entry in os.scandir(base)}
     target_entries = {entry.name: entry for entry in os.scandir(target)}
@@ -58,7 +63,7 @@ def find_differences(base: str, target: str) -> dict:
 
     return differences
 
-CHUNK_SIZE = 32 * 1024 * 1024  # 32 MB
+CHUNK_SIZE = flag_split_size * 1024 * 1024
 
 def split_file_into_chunks(file_path):
     """Split a file into chunks and return the chunks as bytes."""
@@ -80,20 +85,43 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
             rel_path = os.path.relpath(diff_file, base)
             target_file_path = os.path.join(target, rel_path)
             
-            if os.path.getsize(diff_file) > (64 * 1024 * 1024):
-                if flag_verbose:
-                    num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
-                    click.echo(f"File is larger than 128 MB, splitting into {num_chunks} chunks: {rel_path}")
-                # Split the large file into chunks and create a patch for each chunk
-                base_chunks = list(split_file_into_chunks(diff_file))
-                target_chunks = list(split_file_into_chunks(target_file_path))
-                for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
-                    patch_data = bsdiff4.diff(base_chunk, target_chunk)
-                    patch_name = f"{rel_path}.part_{idx}.patch"
+            if os.path.getsize(diff_file) > (flag_large_file_size * 1024 * 1024):
+                if flag_large_file_strategy == 'copy':
+                    zipf.write(target_file_path, rel_path)
+                    if flag_verbose:
+                        click.echo(f"Added file to ZIP: {rel_path}")
+                    continue
+                elif flag_large_file_strategy == 'skip':
+                    if flag_verbose:
+                        click.echo(f"Skipping large file: {rel_path}")
+                    continue
+                elif flag_large_file_strategy == 'split' and flag_split_size > 0:
+                    if flag_verbose:
+                        num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
+                        click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
+                    # Split the large file into chunks and create a patch for each chunk
+                    base_chunks = list(split_file_into_chunks(diff_file))
+                    target_chunks = list(split_file_into_chunks(target_file_path))
+                    for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
+                        patch_data = bsdiff4.diff(base_chunk, target_chunk)
+                        patch_name = f"{rel_path}.part_{idx}.patch"
+                        zipf.writestr(patch_name, patch_data)
+                        
+                        if flag_verbose:
+                            click.echo(f"Created binary patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
+                elif flag_large_file_strategy == 'xdelta':
+                    if flag_verbose:
+                        click.echo(f"File is larger than {flag_large_file_size} MB, using xdelta: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
+                    
+                    patch_data = xdeltawrapper.create_patch(diff_file, target_file_path)
+                    patch_name = f"{rel_path}.patch"
                     zipf.writestr(patch_name, patch_data)
                     
                     if flag_verbose:
-                        click.echo(f"Created binary patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
+                        patch_data_size = bytes_to_human_readable(len(patch_data))
+                        click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
+                else:
+                    raise ValueError(f"Unknown large file strategy: {flag_large_file_strategy}")
             else:
                 patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
                 patch_name = f"{rel_path}.patch"
@@ -138,9 +166,19 @@ def create_file_patch(base: str, target: str, patch_dir: str) -> None:
 @click.option('--patch_dir', type=click.Path(), default=None, help="Directory or file where the patch will be created.")
 @click.option('--mode', type=click.Choice(['file', 'binary'], case_sensitive=False), default='file', help="Mode of operation: 'file' or 'binary'.")
 @click.option('--verbose', '-v', is_flag=True, default=False, help="Enable verbose output.")
-def main(base, target, patch_dir, mode, verbose):
+@click.option('--large-file-strategy', '--lfs', type=click.Choice(['copy', 'split', 'skip', 'xdelta'], case_sensitive=False), default='xdelta', help="binary: Strategy for large files: 'copy' and 'xdelta' is recommended.")
+@click.option('--split-size', type=int, default=16, help="binary: Split size in MB for large files. 0 to disable splitting.")
+@click.option('--large-file-size', type=int, default=32, help="binary: Size in MB for large files. Files larger than this will be handled according to the large file strategy.")
+def main(base, target, patch_dir, mode, verbose, large_file_strategy, split_size, large_file_size):
     global flag_verbose
+    global flag_large_file_strategy
+    global flag_split_size
+    global flag_large_file_size
     flag_verbose = verbose
+    flag_large_file_strategy = large_file_strategy
+    flag_split_size = split_size
+    flag_large_file_size = large_file_size
+    
     if verbose:
         click.echo("Verbose output enabled.")
     
