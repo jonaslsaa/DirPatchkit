@@ -4,11 +4,15 @@ import click
 import zipfile
 import bsdiff4
 import xdeltawrapper
+import threading
 
 flag_verbose = False
 flag_large_file_strategy = 'xdelta'
 flag_split_size = 16
 flag_large_file_size = 32
+
+# Create a lock for synchronizing access to the zip file
+zip_lock = threading.Lock()
 
 def bytes_to_human_readable(num: int) -> str:
     """Convert a number of bytes to a human-readable string."""
@@ -65,6 +69,21 @@ def find_differences(base: str, target: str) -> dict:
 
 CHUNK_SIZE = flag_split_size * 1024 * 1024
 
+def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, zipf: zipfile.ZipFile):
+    if os.path.getsize(diff_file) > (flag_large_file_size * 1024 * 1024):
+        handle_large_file(diff_file, target_file_path, rel_path, zipf)
+    else:
+        patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
+        patch_name = f"{rel_path}.patch"
+        
+        with zip_lock:  # Acquire the lock before writing to the zip file
+            zipf.writestr(patch_name, patch_data)
+
+        if flag_verbose:
+            patch_data_size = bytes_to_human_readable(len(patch_data))
+            click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
+
+
 def split_file_into_chunks(file_path):
     """Split a file into chunks and return the chunks as bytes."""
     with open(file_path, 'rb') as f:
@@ -74,6 +93,55 @@ def split_file_into_chunks(file_path):
                 break
             yield chunk
 
+def handle_large_file(diff_file, target_file_path, rel_path, zipf):
+    if flag_large_file_strategy == 'copy':
+        copy_large_file_to_zip(target_file_path, rel_path, zipf)
+    elif flag_large_file_strategy == 'skip':
+        skip_large_file(rel_path)
+    elif flag_large_file_strategy == 'split' and flag_split_size > 0:
+        split_and_patch_large_file(diff_file, target_file_path, rel_path, zipf)
+    elif flag_large_file_strategy == 'xdelta':
+        xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf)
+    else:
+        raise ValueError(f"Unknown large file strategy: {flag_large_file_strategy}")
+
+def copy_large_file_to_zip(target_file_path, rel_path, zipf):
+    zipf.write(target_file_path, rel_path)
+    if flag_verbose:
+        click.echo(f"Added file to ZIP: {rel_path}")
+
+def skip_large_file(rel_path):
+    if flag_verbose:
+        click.echo(f"Skipping large file: {rel_path}")
+
+def split_and_patch_large_file(diff_file, target_file_path, rel_path, zipf):
+    if flag_verbose:
+        num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
+        click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
+    # Split the large file into chunks and create a patch for each chunk
+    base_chunks = list(split_file_into_chunks(diff_file))
+    target_chunks = list(split_file_into_chunks(target_file_path))
+    for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
+        patch_data = bsdiff4.diff(base_chunk, target_chunk)
+        patch_name = f"{rel_path}.part_{idx}.patch"
+        zipf.writestr(patch_name, patch_data)
+        
+        if flag_verbose:
+            click.echo(f"Created patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
+
+
+def xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf):
+    if flag_verbose:
+        click.echo(f"File is larger than {flag_large_file_size} MB, using xdelta: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
+    
+    patch_data = xdeltawrapper.create_patch(diff_file, target_file_path)
+    patch_name = f"{rel_path}.vcdiff"
+    zipf.writestr(patch_name, patch_data)
+    
+    if flag_verbose:
+        patch_data_size = bytes_to_human_readable(len(patch_data))
+        click.echo(f"Created patch: {patch_name} ({patch_data_size})")
+
 def create_binary_patch(base: str, target: str, patch_file: str) -> None:
     differences = find_differences(base, target)
     
@@ -81,55 +149,18 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
         click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
     
     with zipfile.ZipFile(patch_file, 'w') as zipf:
-        for diff_file in differences['changed']:
-            rel_path = os.path.relpath(diff_file, base)
-            target_file_path = os.path.join(target, rel_path)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for diff_file in differences['changed']:
+                rel_path = os.path.relpath(diff_file, base)
+                target_file_path = os.path.join(target, rel_path)
+                futures.append(executor.submit(create_patch_for_file, diff_file, target_file_path, rel_path, zipf))
             
-            if os.path.getsize(diff_file) > (flag_large_file_size * 1024 * 1024):
-                if flag_large_file_strategy == 'copy':
-                    zipf.write(target_file_path, rel_path)
-                    if flag_verbose:
-                        click.echo(f"Added file to ZIP: {rel_path}")
-                    continue
-                elif flag_large_file_strategy == 'skip':
-                    if flag_verbose:
-                        click.echo(f"Skipping large file: {rel_path}")
-                    continue
-                elif flag_large_file_strategy == 'split' and flag_split_size > 0:
-                    if flag_verbose:
-                        num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
-                        click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
-                    # Split the large file into chunks and create a patch for each chunk
-                    base_chunks = list(split_file_into_chunks(diff_file))
-                    target_chunks = list(split_file_into_chunks(target_file_path))
-                    for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
-                        patch_data = bsdiff4.diff(base_chunk, target_chunk)
-                        patch_name = f"{rel_path}.part_{idx}.patch"
-                        zipf.writestr(patch_name, patch_data)
-                        
-                        if flag_verbose:
-                            click.echo(f"Created binary patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
-                elif flag_large_file_strategy == 'xdelta':
-                    if flag_verbose:
-                        click.echo(f"File is larger than {flag_large_file_size} MB, using xdelta: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
-                    
-                    patch_data = xdeltawrapper.create_patch(diff_file, target_file_path)
-                    patch_name = f"{rel_path}.vcdiff"
-                    zipf.writestr(patch_name, patch_data)
-                    
-                    if flag_verbose:
-                        patch_data_size = bytes_to_human_readable(len(patch_data))
-                        click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
-                else:
-                    raise ValueError(f"Unknown large file strategy: {flag_large_file_strategy}")
-            else:
-                patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
-                patch_name = f"{rel_path}.patch"
-                zipf.writestr(patch_name, patch_data)
-
-                if flag_verbose:
-                    patch_data_size = bytes_to_human_readable(len(patch_data))
-                    click.echo(f"Created binary patch: {patch_name} ({patch_data_size})")
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    click.echo(f"An exception occurred during patch creation: {e}", err=True)
         
         for new_file in differences['new']:
             rel_path = os.path.relpath(new_file, target)
@@ -139,11 +170,10 @@ def create_binary_patch(base: str, target: str, patch_file: str) -> None:
                 click.echo(f"Added new file to ZIP: {rel_path}")
 
 
-
 def create_file_patch(base: str, target: str, patch_dir: str) -> None:
     differences = find_differences(base, target)
     if flag_verbose:
-        click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
+        click.echo(f"\nFound {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
 
     with zipfile.ZipFile(f"{patch_dir}.zip", 'w') as zipf:
         for i, diff_file in enumerate(differences['changed']):
