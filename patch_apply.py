@@ -3,6 +3,7 @@ import click
 import zipfile
 import bsdiff4
 import xdeltawrapper
+import tempfile
 
 def bytes_to_human_readable(num: int) -> str:
     """Convert a number of bytes to a human-readable string."""
@@ -62,24 +63,13 @@ def apply_patch_with_backup(patch_path, target_dir, create_backup):
                     orig_file.write(new_data)
             elif patch_file.endswith('.vcdiff'):
                 original_file_path = os.path.join(target_dir, patch_file.replace('.vcdiff', ''))
-                
-                # Read the original file and the patch data
-                with open(original_file_path, 'rb') as orig_file:
-                    original_data = orig_file.read()
                 patch_data = zipf.read(patch_file)
                 patch_size += len(patch_data)
                 
                 # Apply the patch
-                new_data = xdeltawrapper.apply_patch(original_data, patch_data)
+                xdeltawrapper.apply_patch(original_file_path, patch_data, original_file_path)
                 click.echo(f"Patched: {patch_file}")
                 
-                if create_backup:
-                    create_reverse_patch(original_data, new_data, reverse_patches, original_file_path)
-                    click.echo(f"Created reverse patch: {patch_file}")
-                
-                # Write the patched data back to the original file
-                with open(original_file_path, 'wb') as orig_file:
-                    orig_file.write(new_data)
             else:
                 # For new files, extract them directly
                 destination_path = os.path.join(target_dir, patch_file)
