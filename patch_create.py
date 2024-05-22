@@ -5,13 +5,14 @@ import zipfile
 import bsdiff4
 import xdeltawrapper
 import threading
+import multiprocessing
 
 flag_verbose = False
 flag_large_file_strategy = 'xdelta'
 flag_split_size = 16
 flag_large_file_size = 32
 
-# Create a lock for synchronizing access to the zip file
+# Create a lock for flag_split_size access to the zip file
 zip_lock = threading.Lock()
 
 def bytes_to_human_readable(num: int) -> str:
@@ -35,8 +36,9 @@ def find_differences(base: str, target: str) -> dict:
         'new': []
     }
     if flag_verbose:
-        click.echo(f"Diff: {base}")
-        click.echo(f"   <> {target}")
+        # Print the directories being compared
+        click.echo(f"Comparing: {base}")
+        click.echo(f"      and: {target}")
 
     base_entries = {entry.name: entry for entry in os.scandir(base)}
     target_entries = {entry.name: entry for entry in os.scandir(target)}
@@ -67,13 +69,42 @@ def find_differences(base: str, target: str) -> dict:
 
     return differences
 
-CHUNK_SIZE = flag_split_size * 1024 * 1024
+
+def get_chunk_size():
+    return flag_split_size * 1024 * 1024
+
+import multiprocessing
+
+def _diff_process(base_chunk, target_chunk, output_queue):
+    # Create the diff in a separate process
+    patch_data = bsdiff4.diff(base_chunk, target_chunk)
+    # Put the result into the queue
+    output_queue.put(patch_data)
+
+def bsdiff4_diff(base_chunk: bytes, target_chunk: bytes) -> bytes:
+    """
+    Generate bsdiff4 diff in a separate process and return the result.
+    """
+    
+    # Create a queue for inter-process communication
+    output_queue = multiprocessing.Queue()
+    
+    # Create a new process to generate the diff
+    process = multiprocessing.Process(target=_diff_process, args=(base_chunk, target_chunk, output_queue))
+    process.start()
+    process.join()  # Wait for the process to finish
+    
+    # Get the result from the queue
+    patch_data = output_queue.get()
+    
+    return patch_data
 
 def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, zipf: zipfile.ZipFile):
-    if os.path.getsize(diff_file) > (flag_large_file_size * 1024 * 1024):
+    data_size = os.path.getsize(diff_file)
+    if data_size > (flag_large_file_size * 1024 * 1024):
         handle_large_file(diff_file, target_file_path, rel_path, zipf)
     else:
-        patch_data = bsdiff4.diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
+        patch_data = bsdiff4_diff(open(diff_file, 'rb').read(), open(target_file_path, 'rb').read())
         patch_name = f"{rel_path}.patch"
         
         with zip_lock:  # Acquire the lock before writing to the zip file
@@ -81,14 +112,22 @@ def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, 
 
         if flag_verbose:
             patch_data_size = bytes_to_human_readable(len(patch_data))
-            click.echo(f"Created patch: {patch_name} ({patch_data_size})")
+            original_file_size = bytes_to_human_readable(data_size)
+            click.echo(f"Created patch: {patch_name} ({patch_data_size} from {original_file_size})")
 
+def zipf_writestr(zipf, patch_name, patch_data):
+    with zip_lock:
+        zipf.writestr(patch_name, patch_data)
+
+def zipf_write(zipf, target_file_path, rel_path):
+    with zip_lock:
+        zipf.write(target_file_path, rel_path)
 
 def split_file_into_chunks(file_path):
     """Split a file into chunks and return the chunks as bytes."""
     with open(file_path, 'rb') as f:
         while True:
-            chunk = f.read(CHUNK_SIZE)
+            chunk = f.read(get_chunk_size())
             if not chunk:
                 break
             yield chunk
@@ -116,19 +155,18 @@ def skip_large_file(rel_path):
 
 def split_and_patch_large_file(diff_file, target_file_path, rel_path, zipf):
     if flag_verbose:
-        num_chunks = os.path.getsize(diff_file) // CHUNK_SIZE
-        click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
+        num_chunks = os.path.getsize(diff_file) // get_chunk_size()
+        click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks ({flag_split_size} MB each): {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
     # Split the large file into chunks and create a patch for each chunk
     base_chunks = list(split_file_into_chunks(diff_file))
     target_chunks = list(split_file_into_chunks(target_file_path))
     for idx, (base_chunk, target_chunk) in enumerate(zip(base_chunks, target_chunks)):
-        patch_data = bsdiff4.diff(base_chunk, target_chunk)
+        patch_data = bsdiff4_diff(base_chunk, target_chunk)
         patch_name = f"{rel_path}.part_{idx}.patch"
         zipf.writestr(patch_name, patch_data)
         
         if flag_verbose:
-            click.echo(f"Created patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))})")
-
+            click.echo(f"Created patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))} from {bytes_to_human_readable(len(base_chunk))})")
 
 def xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf):
     if flag_verbose:
@@ -140,7 +178,7 @@ def xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf):
     
     if flag_verbose:
         patch_data_size = bytes_to_human_readable(len(patch_data))
-        click.echo(f"Created patch: {patch_name} ({patch_data_size})")
+        click.echo(f"Created patch: {patch_name} ({patch_data_size} from {bytes_to_human_readable(os.path.getsize(diff_file))})")
 
 def create_binary_patch(base: str, target: str, patch_file: str) -> None:
     differences = find_differences(base, target)
@@ -196,8 +234,8 @@ def create_file_patch(base: str, target: str, patch_dir: str) -> None:
 @click.option('--patch_dir', type=click.Path(), default=None, help="Directory or file where the patch will be created.")
 @click.option('--mode', type=click.Choice(['file', 'binary'], case_sensitive=False), default='file', help="Mode of operation: 'file' or 'binary'.")
 @click.option('--verbose', '-v', is_flag=True, default=False, help="Enable verbose output.")
-@click.option('--large-file-strategy', '--lfs', type=click.Choice(['copy', 'split', 'skip', 'xdelta'], case_sensitive=False), default='xdelta', help="binary: Strategy for large files: 'copy' and 'xdelta' is recommended.")
-@click.option('--split-size', type=int, default=16, help="binary: Split size in MB for large files. 0 to disable splitting.")
+@click.option('--large-file-strategy', '--lfs', type=click.Choice(['copy', 'split', 'skip', 'xdelta'], case_sensitive=False), default='xdelta', help="binary: Strategy for large files: 'copy' and 'xdelta' are recommended. ONLY APPLICABLE FOR 'binary' MODE.")
+@click.option('--split-size', type=int, default=16, help="binary: Split size in MB for large files. 0 to disable splitting. ONLY APPLICABLE FOR 'split' strategy.")
 @click.option('--large-file-size', type=int, default=32, help="binary: Size in MB for large files. Files larger than this will be handled according to the large file strategy.")
 def main(base, target, patch_dir, mode, verbose, large_file_strategy, split_size, large_file_size):
     global flag_verbose
