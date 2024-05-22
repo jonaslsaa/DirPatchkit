@@ -1,5 +1,6 @@
 import os
 import filecmp
+import time
 import click
 import zipfile
 import bsdiff4
@@ -99,7 +100,11 @@ def bsdiff4_diff(base_chunk: bytes, target_chunk: bytes) -> bytes:
     
     return patch_data
 
+def took_time(start_time):
+    return f"{time.time() - start_time:.2f} s"
+
 def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, zipf: zipfile.ZipFile):
+    start_time = time.time()
     data_size = os.path.getsize(diff_file)
     if data_size > (flag_large_file_size * 1024 * 1024):
         handle_large_file(diff_file, target_file_path, rel_path, zipf)
@@ -113,7 +118,7 @@ def create_patch_for_file(diff_file: str, target_file_path: str, rel_path: str, 
         if flag_verbose:
             patch_data_size = bytes_to_human_readable(len(patch_data))
             original_file_size = bytes_to_human_readable(data_size)
-            click.echo(f"Created patch: {patch_name} ({patch_data_size} from {original_file_size})")
+            click.echo(f"Created patch: {patch_name} ({patch_data_size} from {original_file_size}) - {took_time(start_time)}")
 
 def zipf_writestr(zipf, patch_name, patch_data):
     with zip_lock:
@@ -154,6 +159,7 @@ def skip_large_file(rel_path):
         click.echo(f"Skipping large file: {rel_path}")
 
 def split_and_patch_large_file(diff_file, target_file_path, rel_path, zipf):
+    start_time = time.time()
     if flag_verbose:
         num_chunks = os.path.getsize(diff_file) // get_chunk_size()
         click.echo(f"File is larger than {flag_large_file_size} MB, splitting into {num_chunks} chunks ({flag_split_size} MB each): {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
@@ -166,9 +172,10 @@ def split_and_patch_large_file(diff_file, target_file_path, rel_path, zipf):
         zipf.writestr(patch_name, patch_data)
         
         if flag_verbose:
-            click.echo(f"Created patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))} from {bytes_to_human_readable(len(base_chunk))})")
+            click.echo(f"Created patch for chunk {idx}/{len(base_chunks)}: {patch_name} ({bytes_to_human_readable(len(patch_data))} from {bytes_to_human_readable(len(base_chunk))}) - {took_time(start_time)}")
 
 def xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf):
+    start_time = time.time()
     if flag_verbose:
         click.echo(f"File is larger than {flag_large_file_size} MB, using xdelta: {rel_path} ({bytes_to_human_readable(os.path.getsize(diff_file))})")
     
@@ -178,13 +185,17 @@ def xdelta_patch_large_file(diff_file, target_file_path, rel_path, zipf):
     
     if flag_verbose:
         patch_data_size = bytes_to_human_readable(len(patch_data))
-        click.echo(f"Created patch: {patch_name} ({patch_data_size} from {bytes_to_human_readable(os.path.getsize(diff_file))})")
+        click.echo(f"Created patch: {patch_name} ({patch_data_size} from {bytes_to_human_readable(os.path.getsize(diff_file))}) - {took_time(start_time)}")
 
 def create_binary_patch(base: str, target: str, patch_file: str) -> None:
     differences = find_differences(base, target)
     
     if flag_verbose:
         click.echo(f"Found {len(differences['changed'])} changed files and {len(differences['new'])} new files.")
+        for diff_file in differences['changed']:
+            click.echo(f"  - Changed file (size: {bytes_to_human_readable(os.path.getsize(diff_file))}): {diff_file}")
+        for new_file in differences['new']:
+            click.echo(f"  - New file (size: {bytes_to_human_readable(os.path.getsize(new_file))}): {new_file}")
     
     with zipfile.ZipFile(patch_file, 'w') as zipf:
         with concurrent.futures.ThreadPoolExecutor() as executor:
